@@ -1,0 +1,33 @@
+name: Validate Skills
+
+on:
+  push:
+    branches: [main]
+    paths: ['skills/**']
+  pull_request:
+    paths: ['skills/**']
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh install.sh
+
+      - name: Validate all skills
+        run: ./scripts/validate.sh --all
+
+      - name: Build index
+        run: ./scripts/build-index.sh
+
+      - name: Verify index is valid JSON
+        run: python3 -c "import json; json.load(open('skill_index.json'))"
+
+      - name: Upload index artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-index
+          path: skill_index.json

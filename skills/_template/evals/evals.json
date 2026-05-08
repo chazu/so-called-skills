@@ -1,0 +1,15 @@
+{
+  "skill_name": "_template",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Example prompt that should trigger this skill",
+      "expected_output": "Description of what the agent should produce",
+      "assertions": [
+        "Agent activated the skill",
+        "Output includes expected content",
+        "No errors occurred"
+      ]
+    }
+  ]
+}
