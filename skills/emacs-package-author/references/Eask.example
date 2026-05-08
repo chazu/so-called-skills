@@ -1,0 +1,25 @@
+;; -*- mode: eask; lexical-binding: t -*-
+
+(package "PKG" "0.1.0" "SHORT SUMMARY")
+
+(website-url "https://github.com/USER/PKG")
+(keywords "convenience" "tools")
+
+(package-file "PKG.el")
+(files "*.el" "test/*.el")
+
+(script "test" "eask test buttercup")
+(script "lint" "eask lint package && eask lint checkdoc && eask lint indent")
+(script "ci"   "eask install-deps --dev && eask compile && eask test buttercup")
+
+(source 'gnu)
+(source 'nongnu)
+(source 'melpa)
+
+(depends-on "emacs" "28.1")
+;; (depends-on "dash" "2.19")
+
+(development
+ (depends-on "buttercup")
+ (depends-on "package-lint")
+ (depends-on "undercover"))

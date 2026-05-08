@@ -1,2 +1,13 @@
 [
+  {
+    "name": "emacs-package-author",
+    "description": "Use when creating, scaffolding, refactoring, or maintaining Emacs Lisp packages and libraries. Triggers on: \"write emacs package\", \"elisp library\", \"MELPA submission\", \"package.el header\", \"Cask/Eask/Eldev setup\", or any request involving a `.el` file with a `Package-Requires` header. Covers layout, headers, build tooling (Eask/Eldev/Cask), testing (Buttercup/ERT), CI, README with straight+use-package install snippets, and detailed docs.",
+    "directory": "skills/emacs-package-author",
+    "version": "0.1.0",
+    "author": "chazu",
+    "license": "MIT",
+    "has_evals": false,
+    "has_scripts": true,
+    "indexed_at": "2026-05-08T12:46:50Z"
+  }
 ]

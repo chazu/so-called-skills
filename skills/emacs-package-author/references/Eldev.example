@@ -1,0 +1,15 @@
+;; -*- mode: emacs-lisp; lexical-binding: t -*-
+
+(eldev-use-package-archive 'gnu)
+(eldev-use-package-archive 'melpa)
+
+(eldev-use-plugin 'autoloads)
+
+(eldev-add-extra-dependencies 'test 'buttercup 'undercover)
+(eldev-add-extra-dependencies 'lint 'package-lint)
+
+(setf eldev-test-framework 'buttercup)
+(setf eldev-test-buttercup-concise t)
+
+;; Treat byte-compile warnings as errors.
+(setf eldev-build-treat-warnings-as-errors t)
