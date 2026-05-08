@@ -3,6 +3,9 @@
 This repository contains reusable Agent Skills that can be discovered and
 activated by Claude Code, Jcode, and other Agent Skills-compatible tools.
 
+**Also read and observe the guidance in [AGENTS.md](AGENTS.md)** for detailed
+conventions, workflow, and quality standards.
+
 ## For Agents
 
 When working in this repository:
