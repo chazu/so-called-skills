@@ -8,6 +8,18 @@
     "license": "MIT",
     "has_evals": false,
     "has_scripts": true,
-    "indexed_at": "2026-05-08T12:46:50Z"
+    "indexed_at": "2026-09-08T00:55:05Z"
+  }
+  ,
+  {
+    "name": "revise-docs",
+    "description": "Revises LLM-authored documents through a human review loop, treating the entire Git diff from a clean, committed baseline as review annotations. Use when the user invokes /revise-docs or wants to annotate one or more documents, usually Markdown, for an agent to revise and commit.",
+    "directory": "skills/revise-docs",
+    "version": "0.1.0",
+    "author": "chazu",
+    "license": "MIT",
+    "has_evals": false,
+    "has_scripts": false,
+    "indexed_at": "2026-09-08T00:55:05Z"
   }
 ]
