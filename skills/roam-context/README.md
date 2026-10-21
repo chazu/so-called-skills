@@ -85,10 +85,15 @@ Related: [[id:1CD70A22-7867-474E-BFC2-02E8F6423E1F][Tartan]]
 
 ## Daily Triage
 
+> **Reference only.** `emacs/roam-ctx-triage.el` is a reference copy. The
+> maintained version lives in the author's private dotfiles repository, and
+> updates to this copy are best-effort only, so it may lag behind. Copy it
+> into your own config rather than loading it from this repository.
+
 Load the triage mode once in your Emacs config:
 
 ```elisp
-(add-to-list 'load-path "~/dev/ai/skills/skills/roam-context/emacs")
+(add-to-list 'load-path "/path/to/your/copy")
 (autoload 'roam-ctx-triage "roam-ctx-triage" nil t)
 ```
 

@@ -7,6 +7,9 @@
 
 ;;; Commentary:
 
+;; REFERENCE COPY: the maintained version lives in the author's private
+;; dotfiles repository.  Updates to this copy are best-effort only.
+
 ;; Agents append captures to dated files in an inbox directory with the
 ;; `roam-ctx' CLI.  Each capture is a top-level heading whose properties carry
 ;; a one-line SUMMARY and a filing recommendation: FILE_TO is "new" or a node
