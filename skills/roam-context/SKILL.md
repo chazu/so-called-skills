@@ -40,7 +40,8 @@ All access goes through `scripts/roam-ctx`, a CLI bundled with this skill.
 1. **Check availability once per session.** Run `scripts/roam-ctx status`. If
    it reports a missing dependency or database, tell the user what is missing
    and continue without notes. If zero notes are tagged, skip reading and go
-   to capture only.
+   to capture only. If it reports the inbox missing, do not create it yet;
+   see step 5.
 
 2. **Scan the index.** Run `scripts/roam-ctx index`. Each line is
    `id<TAB>title<TAB>tags<TAB>summary` (summary `-` when absent). Pick the
@@ -61,10 +62,13 @@ All access goes through `scripts/roam-ctx`, a CLI bundled with this skill.
    resolved question), prepare a capture:
    - **Find related notes.** Use `index` and `search` for shared notes the
      capture relates to; pass each as `--link <id>`.
-   - **Recommend where to file it.** If one shared note is the natural home,
-     pass `--file-to <id>`, run `scripts/roam-ctx outline <id>`, and pass the
-     best heading path verbatim as `--under "A > B"` (omit it to file at the
-     top level of the note). Otherwise leave `--file-to` at its default, `new`.
+   - **Recommend where to file it.** By default (`--file-to auto`) a capture
+     goes to the current repository's project hub note when the user has
+     shared one (`scripts/roam-ctx hub` shows it), else to a new note. If a
+     different shared note is the natural home, pass `--file-to <id>`; for a
+     standalone idea, pass `--file-to new`. To place it under a heading, run
+     `scripts/roam-ctx outline <id>` (on the hub's id too) and pass the best
+     path verbatim as `--under "A > B"`.
    - **Tag for retrieval.** Pass `--tags` with three to six keywords: the
      topic, technologies, and concepts someone would search for later. The
      script adds the share tag and, from git at the working directory, the
@@ -83,9 +87,17 @@ All access goes through `scripts/roam-ctx`, a CLI bundled with this skill.
    EOF
    ```
 
-   The script validates every id and heading path and prints the inbox file.
-   On an error, fix the argument rather than dropping it. Mention the capture
-   to the user in one line.
+   For a long body, `--body-file <path>` replaces stdin. The script validates
+   every id and heading path and prints the inbox file. On an error, fix the
+   argument rather than dropping it. Mention the capture to the user in one
+   line, and relay any hint it prints about the project hub: that the repo
+   has no hub note (the user can create one with `C-c a p` in the project), or
+   that the hub is not shared.
+
+   **If the inbox does not exist** (exit status 3), ask the user whether to
+   create it at the path shown. Only if they agree, run `scripts/roam-ctx init`
+   and repeat the capture. If they decline, tell them the finding was not
+   saved.
 
 6. **Check pending captures before duplicating.** Run `scripts/roam-ctx inbox`
    to list untriaged captures from any agent; `inbox --full` prints them.
@@ -123,6 +135,8 @@ Environment variables, all optional:
   speculate about their content.
 - **No good filing target**: use `--file-to new`. A weak recommendation
   costs the user more than none.
+- **Outside a git repository**: there is no hub or repository tag; `auto`
+  means a new note.
 - **Heading-level notes**: `search` covers only notes shared at file level
   (`#+filetags: :agent:`). Heading nodes tagged individually appear in `index`
   and work with `get` and `links`, but are not searched.

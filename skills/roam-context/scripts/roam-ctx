@@ -31,10 +31,14 @@ Commands:
   search <pattern>          Search shared notes (rg regex, smart case)
   outline <id>              Heading paths inside a shared note (for --under)
   links <id>                Backlinks and forward links among shared notes
+  hub                       The current repo's shared project hub note
   capture --title T --summary S [--tags a,b] [--link ID]...
-          [--file-to new|ID [--under PATH]] [--source S]
-                            Append a capture (body on stdin) to today's inbox.
-                            Repo, owner, branch, commit come from git at $PWD.
+          [--file-to auto|new|ID [--under PATH]] [--source S] [--body-file F]
+                            Append a capture (body on stdin or --body-file) to
+                            today's inbox. Repo, owner, branch, commit come
+                            from git at $PWD. auto files to the repo's hub.
+                            Exits 3 if the inbox does not exist.
+  init                      Create the inbox directory (ask the user first)
   inbox [--full]            List pending captures (--full prints them)
   status                    Check dependencies and configuration
   help                      Show this help
@@ -220,29 +224,68 @@ tag_words() {
 }
 
 # Print "repo<TAB>name<TAB>owner<TAB>branch<TAB>commit" for the git repo at $PWD.
+# repo matches the PROJECT_REPO key of init-conversations' hub notes:
+# lower-cased host/owner/name from origin, else local/<dirname>.
 git_context() {
     git rev-parse --is-inside-work-tree > /dev/null 2>&1 || return 0
-    local url path name owner branch commit
-    url=$(git remote get-url origin 2> /dev/null ||
-        git remote get-url "$(git remote | head -1)" 2> /dev/null || true)
+    local url repo name owner="" branch commit
+    url=$(git remote get-url origin 2> /dev/null || true)
     if [[ -n "$url" ]]; then
-        # git@host:o/n.git, ssh://git@host/o/n.git, https://host/o/n -> host/o/n
-        path=$(printf '%s' "$url" | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:([^0-9])#/\1#; s#\.git$##; s#/+$##')
-        name="${path##*/}"
-        owner="${path#*/}"
+        repo=$(printf '%s' "$url" | sed -E 's#^(ssh|git|https?)://##; s#^[^@/]+@##; s#^([^:/]+):#\1/#; s#\.git/?$##; s#/$##' |
+            tr '[:upper:]' '[:lower:]')
+        name="${repo##*/}"
+        owner="${repo#*/}"
         owner="${owner%/*}"
     else
-        path=$(git rev-parse --show-toplevel)
-        name="${path##*/}"
-        owner=""
+        name=$(basename "$(git rev-parse --show-toplevel)")
+        repo="local/$name"
     fi
     branch=$(git rev-parse --abbrev-ref HEAD 2> /dev/null || true)
     commit=$(git rev-parse --short HEAD 2> /dev/null || true)
-    printf '%s\t%s\t%s\t%s\t%s\n' "$path" "$name" "$owner" "$branch" "$commit"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$name" "$owner" "$branch" "$commit"
+}
+
+# Find the project hub note (tagged project, PROJECT_REPO = $1).
+# Print "id<TAB>title<TAB>shared" where shared is 1 or 0; nothing if none.
+hub_for() {
+    local key="${1//\'/\'\'}"
+    sql "$(shared_cte)
+        SELECT $(uq n.id), $(uq n.title), n.id IN shared FROM nodes n
+        WHERE n.level = 0
+          AND n.id IN (SELECT node_id FROM tags WHERE tag = '\"project\"')
+          AND instr(n.properties, '(\"PROJECT_REPO\" . \"$key\")') > 0
+        LIMIT 1;"
+}
+
+# Explain why there is no usable hub for repo $1 (hub row in $2), on stderr.
+hub_hint() {
+    if [[ -z "$2" ]]; then
+        echo "roam-ctx: no project hub note for $1; suggest the user create one (C-c a p in the project)" >&2
+    else
+        echo "roam-ctx: project hub '$(cut -f2 <<< "$2")' for $1 is not tagged '$TAG'; suggest the user share it" >&2
+    fi
+}
+
+cmd_hub() {
+    local repo row
+    IFS=$'\t' read -r repo _ <<< "$(git_context)" || true
+    [[ -n "$repo" ]] || die "not in a git repository"
+    row=$(hub_for "$repo")
+    if [[ -n "$row" && "${row##*$'\t'}" == "1" ]]; then
+        cut -f1,2 <<< "$row"
+    else
+        hub_hint "$repo" "$row"
+        exit 1
+    fi
+}
+
+cmd_init() {
+    mkdir -p "$INBOX"
+    echo "$INBOX"
 }
 
 cmd_capture() {
-    local title="" summary="" tags="" src="$SOURCE" file_to="new" under=""
+    local title="" summary="" tags="" src="$SOURCE" file_to="auto" under="" body_file=""
     local links=()
     while [[ $# -gt 0 ]]; do
         [[ $# -ge 2 ]] || die "capture option $1 needs a value"
@@ -254,6 +297,7 @@ cmd_capture() {
             --file-to) file_to="$2" ;;
             --under) under="$2" ;;
             --source) src="$2" ;;
+            --body-file) body_file="$2" ;;
             *) die "unknown capture option: $1" ;;
         esac
         shift 2
@@ -261,7 +305,30 @@ cmd_capture() {
     title="${title//$'\n'/ }"
     summary="${summary//$'\n'/ }"
     [[ -n "${title// /}" && -n "${summary// /}" ]] ||
-        die "usage: roam-ctx capture --title T --summary S [--tags a,b] [--link ID]... [--file-to new|ID [--under PATH]] [--source S] < body"
+        die "usage: roam-ctx capture --title T --summary S [--tags a,b] [--link ID]... [--file-to auto|new|ID [--under PATH]] [--source S] [--body-file F | < body]"
+
+    # Captures never create the inbox: the user decides where it lives.
+    [[ -d "$INBOX" ]] || {
+        echo "roam-ctx: inbox $INBOX does not exist; ask the user whether to create it, then run: roam-ctx init" >&2
+        exit 3
+    }
+
+    local repo="" name="" owner="" branch="" commit=""
+    IFS=$'\t' read -r repo name owner branch commit <<< "$(git_context)" || true
+
+    # auto: the repo's shared hub note if there is one, else a new note.
+    if [[ "$file_to" == "auto" ]]; then
+        file_to="new"
+        if [[ -n "$repo" ]]; then
+            local hub
+            hub=$(hub_for "$repo")
+            if [[ -n "$hub" && "${hub##*$'\t'}" == "1" ]]; then
+                file_to="${hub%%$'\t'*}"
+            else
+                hub_hint "$repo" "$hub"
+            fi
+        fi
+    fi
 
     # Validate the filing recommendation against shared notes.
     if [[ "$file_to" == "new" ]]; then
@@ -282,12 +349,14 @@ cmd_capture() {
     done
 
     local body=""
-    [[ -t 0 ]] || body=$(cat)
+    if [[ -n "$body_file" ]]; then
+        [[ -r "$body_file" ]] || die "body file not readable: $body_file"
+        body=$(cat "$body_file")
+    elif [[ ! -t 0 ]]; then
+        body=$(cat)
+    fi
     # Demote headings in the body so they nest under this capture.
     body=$(printf '%s' "$body" | sed -E 's/^(\*+) /*\1 /')
-
-    local repo="" name="" owner="" branch="" commit=""
-    IFS=$'\t' read -r repo name owner branch commit <<< "$(git_context)" || true
 
     local words
     words=$(
@@ -299,7 +368,6 @@ cmd_capture() {
     local tagstr
     tagstr=":$(printf '%s\n' "$words" | sed -E 's/[^A-Za-z0-9_@]+/_/g; /^$/d' | awk '!seen[$0]++' | paste -sd: -):"
 
-    mkdir -p "$INBOX"
     local file
     file="$INBOX/$(date +%F).org"
     local lock="$file.lock" tries=0
@@ -357,7 +425,11 @@ cmd_status() {
     else
         echo "MISS  database $DB (set ROAM_CTX_DB)"; ok=false
     fi
-    echo "      inbox $INBOX ($(cmd_inbox | wc -l | tr -d ' ') pending)"
+    if [[ -d "$INBOX" ]]; then
+        echo "ok    inbox $INBOX ($(cmd_inbox | wc -l | tr -d ' ') pending)"
+    else
+        echo "MISS  inbox $INBOX (ask the user, then: roam-ctx init)"
+    fi
     $ok
 }
 
@@ -368,6 +440,8 @@ case "${1:-help}" in
     outline) shift; cmd_outline "$@" ;;
     links) shift; cmd_links "$@" ;;
     capture) shift; cmd_capture "$@" ;;
+    hub) cmd_hub ;;
+    init) cmd_init ;;
     inbox) shift; cmd_inbox "$@" ;;
     status) cmd_status ;;
     help | -h | --help) usage ;;

@@ -81,6 +81,13 @@ Related: [[id:1CD70A22-7867-474E-BFC2-02E8F6423E1F][Tartan]]
   directory. The agent adds keywords, a summary, and links to shared notes.
 - `FILE_TO` is `new` or a shared note's id; `FILE_UNDER` is a heading path in
   that note. The CLI rejects ids and paths that do not exist.
+- Without a target from the agent, a capture goes to the repository's
+  project hub note: a note tagged `:project:` whose `PROJECT_REPO` property
+  is the normalised origin remote (`github.com/owner/repo`), when that note is
+  also shared. Otherwise it becomes a new note, and the agent suggests
+  creating or sharing the hub.
+- Agents never create the inbox. If it is missing, they ask you, then run
+  `roam-ctx init`.
 - Captures have no `:ID:`, so org-roam never indexes the inbox.
 
 ## Daily Triage
