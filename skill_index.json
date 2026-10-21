@@ -8,7 +8,7 @@
     "license": "MIT",
     "has_evals": false,
     "has_scripts": true,
-    "indexed_at": "2026-09-08T00:55:05Z"
+    "indexed_at": "2026-10-21T12:03:53Z"
   }
   ,
   {
@@ -20,6 +20,18 @@
     "license": "MIT",
     "has_evals": false,
     "has_scripts": false,
-    "indexed_at": "2026-09-08T00:55:05Z"
+    "indexed_at": "2026-10-21T12:03:53Z"
+  }
+  ,
+  {
+    "name": "roam-context",
+    "description": "Uses the user's org-roam notes as an external, read-only context store and stages new knowledge in a dated inbox for the user to triage. Use when the user asks what their notes say about something, when a task would benefit from context the user has recorded (project background, decisions, preferences), or when the user asks to remember, capture, or save a finding for later. Only notes the user has tagged for agents are visible.",
+    "directory": "skills/roam-context",
+    "version": "0.1.0",
+    "author": "chazu",
+    "license": "MIT",
+    "has_evals": true,
+    "has_scripts": true,
+    "indexed_at": "2026-10-21T12:03:53Z"
   }
 ]

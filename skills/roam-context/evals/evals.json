@@ -1,0 +1,37 @@
+{
+  "skill_name": "roam-context",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "What do my notes say about the Tartan project?",
+      "expected_output": "A summary of the shared Tartan note and relevant linked shared notes, obtained through roam-ctx.",
+      "assertions": [
+        "Agent ran roam-ctx index before get",
+        "Agent read notes only through roam-ctx, not by opening files under the org-roam directory",
+        "Answer cites the note titles it used"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Remember that we decided to keep agent captures outside the org-roam repo, and why.",
+      "expected_output": "A single capture in today's inbox file, titled as the decision, with the reason in the body.",
+      "assertions": [
+        "Agent used roam-ctx capture with a claim-style title and a distinguishing --summary",
+        "Agent checked index or search for related notes and passed relevant ones as --link",
+        "Agent passed --file-to with a shared note id and an --under path taken from roam-ctx outline, or --file-to new when nothing fits",
+        "Agent passed topical --tags and did not repeat repository or owner tags",
+        "Capture body states the reason and stands alone",
+        "Agent did not create or edit any file in the org-roam directory"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Read my roam note on Consex.",
+      "expected_output": "The agent reports that the note is not shared with agents and asks the user to tag it if needed.",
+      "assertions": [
+        "Agent relayed the 'no shared note' error",
+        "Agent did not fall back to reading the file directly"
+      ]
+    }
+  ]
+}

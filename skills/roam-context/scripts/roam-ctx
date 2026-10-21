@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# roam-ctx -- Read-only context access to an org-roam store, plus a staging inbox
+#
+# Reads the org-roam SQLite database and note files directly; never writes to
+# them and never talks to Emacs. Only notes tagged $ROAM_CTX_TAG are visible.
+# Captures go to a dated org file in $ROAM_CTX_INBOX for human triage.
+#
+# Usage: roam-ctx <command> [args]   (see `roam-ctx help`)
+#
+# Requires: bash, sqlite3, rg
+
+set -euo pipefail
+
+DB="${ROAM_CTX_DB:-$HOME/.emacs.d/org-roam.db}"
+TAG="${ROAM_CTX_TAG:-agent}"
+INBOX="${ROAM_CTX_INBOX:-$HOME/org/agent-inbox}"
+SOURCE="${ROAM_CTX_SOURCE:-agent}"
+
+die() {
+    echo "roam-ctx: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+roam-ctx -- org-roam as an external context store for agents
+
+Commands:
+  index [--tag T]           List shared notes: id, title, tags, summary (TSV)
+  get <id>                  Print a shared note's content
+  search <pattern>          Search shared notes (rg regex, smart case)
+  outline <id>              Heading paths inside a shared note (for --under)
+  links <id>                Backlinks and forward links among shared notes
+  capture --title T --summary S [--tags a,b] [--link ID]...
+          [--file-to new|ID [--under PATH]] [--source S]
+                            Append a capture (body on stdin) to today's inbox.
+                            Repo, owner, branch, commit come from git at $PWD.
+  inbox [--full]            List pending captures (--full prints them)
+  status                    Check dependencies and configuration
+  help                      Show this help
+
+Environment:
+  ROAM_CTX_DB      org-roam database   (default ~/.emacs.d/org-roam.db)
+  ROAM_CTX_TAG     opt-in tag          (default agent)
+  ROAM_CTX_INBOX   capture directory   (default ~/org/agent-inbox)
+  ROAM_CTX_SOURCE  capture source name (default agent)
+EOF
+}
+
+# --- database helpers -------------------------------------------------------
+
+# org-roam stores strings prin1'd: "\"Title\"". Emit SQL that unquotes column $1.
+uq() {
+    # shellcheck disable=SC1003  # literal backslashes are intended
+    printf "replace(replace(substr(%s,2,length(%s)-2),'%s','%s'),'%s','%s')" \
+        "$1" "$1" '\"' '"' '\\' '\'
+}
+
+# Quote a value the way org-roam stores it, as an SQL literal.
+lit() {
+    local v="${1//\'/\'\'}"
+    printf "'\"%s\"'" "$v"
+}
+
+sql() {
+    [[ -r "$DB" ]] || die "database not readable: $DB (set ROAM_CTX_DB)"
+    sqlite3 -readonly -noheader -separator $'\t' "$DB" "$1"
+}
+
+# Common table of node ids that opted in via the tag.
+shared_cte() {
+    printf "WITH shared AS (SELECT DISTINCT node_id FROM tags WHERE tag = %s)" "$(lit "$TAG")"
+}
+
+check_id() {
+    [[ "$1" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "invalid id: $1"
+}
+
+# Print "file<TAB>level<TAB>title" for a shared node, or fail.
+shared_node() {
+    local row
+    row=$(sql "$(shared_cte)
+        SELECT $(uq file), level, $(uq title) FROM nodes
+        WHERE id = $(lit "$1") AND id IN shared;")
+    [[ -n "$row" ]] || die "no shared note with id $1 (missing, or not tagged '$TAG')"
+    printf '%s\n' "$row"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_index() {
+    local filter=""
+    if [[ "${1:-}" == "--tag" ]]; then
+        [[ -n "${2:-}" ]] || die "--tag needs a value"
+        filter="AND n.id IN (SELECT node_id FROM tags WHERE tag = $(lit "$2"))"
+    fi
+    # SUMMARY comes from the node's property drawer: ("SUMMARY" . "text")
+    sql "$(shared_cte)
+        SELECT id, title, tags,
+               CASE WHEN p > 0 THEN substr(r, 1, instr(r, '\")') - 1) ELSE '-' END
+        FROM (
+            SELECT $(uq n.id) AS id, $(uq n.title) AS title,
+                   (SELECT group_concat($(uq t.tag), ',') FROM tags t
+                    WHERE t.node_id = n.id) AS tags,
+                   instr(n.properties, '(\"SUMMARY\" . \"') AS p,
+                   substr(n.properties, instr(n.properties, '(\"SUMMARY\" . \"') + 14) AS r
+            FROM nodes n
+            WHERE n.id IN shared $filter
+            ORDER BY n.title COLLATE NOCASE
+        );"
+}
+
+# Print the text of a node: the whole file, or a heading node's subtree.
+node_body() {
+    local file="$1" level="$2" id="$3" start
+    [[ -r "$file" ]] || die "note file missing: $file (database may be stale)"
+    if [[ "$level" == "0" ]]; then
+        cat "$file"
+        return
+    fi
+    start=$(awk -v id="$id" '
+        /^\*+ / { hl = NR; match($0, /^\*+/); lv = RLENGTH }
+        tolower($0) ~ /^[ \t]*:id:/ && $2 == id { print hl ":" lv; exit }
+    ' "$file")
+    [[ -n "$start" ]] || die "id $id not found in $file (database may be stale)"
+    awk -v from="${start%%:*}" -v lv="${start##*:}" '
+        NR < from { next }
+        NR > from && /^\*+ / { match($0, /^\*+/); if (RLENGTH <= lv) exit }
+        { print }
+    ' "$file"
+}
+
+cmd_get() {
+    local id="${1:-}" row file level title
+    [[ -n "$id" ]] || die "usage: roam-ctx get <id>"
+    check_id "$id"
+    row=$(shared_node "$id") || exit 1
+    IFS=$'\t' read -r file level title <<< "$row"
+    echo "== $title [$id] $file"
+    node_body "$file" "$level" "$id"
+}
+
+# Heading paths below a node, relative to it, as "A > B > C". Matches what the
+# triage mode accepts for FILE_UNDER: TODO keywords, priorities, tags stripped.
+cmd_outline() {
+    local id="${1:-}" row file level title
+    [[ -n "$id" ]] || die "usage: roam-ctx outline <id>"
+    check_id "$id"
+    row=$(shared_node "$id") || exit 1
+    IFS=$'\t' read -r file level title <<< "$row"
+    node_body "$file" "$level" "$id" | awk -v base="$level" '
+        /^\*+ / {
+            match($0, /^\*+/); lv = RLENGTH
+            if (lv <= base) next
+            t = substr($0, lv + 2)
+            sub(/^(TODO|DONE|NEXT|WAIT|WAITING|HOLD|STARTED|CANCELLED|CANCELED) +/, "", t)
+            sub(/^\[#[A-Z0-9]\] +/, "", t)
+            sub(/[ \t]+:[A-Za-z0-9_@#%:]+:[ \t]*$/, "", t)
+            path[lv] = t
+            for (k in path) if (k + 0 > lv) delete path[k]
+            s = ""
+            for (i = base + 1; i <= lv; i++) {
+                if (!(i in path)) { s = ""; break }
+                s = s (s == "" ? "" : " > ") path[i]
+            }
+            if (s != "") print s
+        }'
+}
+
+cmd_search() {
+    local pattern="${1:-}" map
+    [[ -n "$pattern" ]] || die "usage: roam-ctx search <pattern>"
+    # Only files whose file-level node is shared, so unshared headings stay hidden.
+    map=$(sql "$(shared_cte)
+        SELECT $(uq file), $(uq id), $(uq title) FROM nodes
+        WHERE level = 0 AND id IN shared;")
+    [[ -n "$map" ]] || return 0
+    local files=()
+    while IFS=$'\t' read -r f _ _; do
+        [[ -r "$f" ]] && files+=("$f")
+    done <<< "$map"
+    ((${#files[@]})) || return 0
+    rg --smart-case --line-number --no-heading --with-filename --max-count 5 \
+        -- "$pattern" "${files[@]}" |
+        awk -F: '
+            FNR == NR { split($0, c, "\t"); id[c[1]] = c[2]; ti[c[1]] = c[3]; next }
+            {
+                f = $1; ln = $2; text = $0
+                sub(/^[^:]*:[^:]*:/, "", text)
+                printf "%s\t%s\t%s\t%s\n", id[f], ti[f], ln, text
+            }' <(printf '%s\n' "$map") - || true
+}
+
+cmd_links() {
+    local id="${1:-}" hidden
+    [[ -n "$id" ]] || die "usage: roam-ctx links <id>"
+    check_id "$id"
+    shared_node "$id" > /dev/null || exit 1
+    sql "$(shared_cte)
+        SELECT DISTINCT 'back', $(uq n.id), $(uq n.title) FROM links l
+        JOIN nodes n ON n.id = l.source
+        WHERE l.dest = $(lit "$id") AND l.type = '\"id\"' AND l.source IN shared
+        UNION
+        SELECT DISTINCT 'fwd', $(uq n.id), $(uq n.title) FROM links l
+        JOIN nodes n ON n.id = l.dest
+        WHERE l.source = $(lit "$id") AND l.type = '\"id\"' AND l.dest IN shared;"
+    hidden=$(sql "$(shared_cte)
+        SELECT count(*) FROM links
+        WHERE type = '\"id\"' AND (
+            (dest = $(lit "$id") AND source NOT IN shared) OR
+            (source = $(lit "$id") AND dest NOT IN shared));")
+    if [[ "$hidden" != "0" ]]; then
+        echo "($hidden link(s) to unshared notes hidden)"
+    fi
+}
+
+# Turn "a, b-c,d" into org tag words: a b_c d
+tag_words() {
+    printf '%s' "$1" | tr ',' '\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/[^A-Za-z0-9_@]+/_/g; /^$/d'
+}
+
+# Print "repo<TAB>name<TAB>owner<TAB>branch<TAB>commit" for the git repo at $PWD.
+git_context() {
+    git rev-parse --is-inside-work-tree > /dev/null 2>&1 || return 0
+    local url path name owner branch commit
+    url=$(git remote get-url origin 2> /dev/null ||
+        git remote get-url "$(git remote | head -1)" 2> /dev/null || true)
+    if [[ -n "$url" ]]; then
+        # git@host:o/n.git, ssh://git@host/o/n.git, https://host/o/n -> host/o/n
+        path=$(printf '%s' "$url" | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:([^0-9])#/\1#; s#\.git$##; s#/+$##')
+        name="${path##*/}"
+        owner="${path#*/}"
+        owner="${owner%/*}"
+    else
+        path=$(git rev-parse --show-toplevel)
+        name="${path##*/}"
+        owner=""
+    fi
+    branch=$(git rev-parse --abbrev-ref HEAD 2> /dev/null || true)
+    commit=$(git rev-parse --short HEAD 2> /dev/null || true)
+    printf '%s\t%s\t%s\t%s\t%s\n' "$path" "$name" "$owner" "$branch" "$commit"
+}
+
+cmd_capture() {
+    local title="" summary="" tags="" src="$SOURCE" file_to="new" under=""
+    local links=()
+    while [[ $# -gt 0 ]]; do
+        [[ $# -ge 2 ]] || die "capture option $1 needs a value"
+        case "$1" in
+            --title) title="$2" ;;
+            --summary) summary="$2" ;;
+            --tags) tags="$2" ;;
+            --link) links+=("$2") ;;
+            --file-to) file_to="$2" ;;
+            --under) under="$2" ;;
+            --source) src="$2" ;;
+            *) die "unknown capture option: $1" ;;
+        esac
+        shift 2
+    done
+    title="${title//$'\n'/ }"
+    summary="${summary//$'\n'/ }"
+    [[ -n "${title// /}" && -n "${summary// /}" ]] ||
+        die "usage: roam-ctx capture --title T --summary S [--tags a,b] [--link ID]... [--file-to new|ID [--under PATH]] [--source S] < body"
+
+    # Validate the filing recommendation against shared notes.
+    if [[ "$file_to" == "new" ]]; then
+        [[ -z "$under" ]] || die "--under needs --file-to <id>"
+    else
+        check_id "$file_to"
+        shared_node "$file_to" > /dev/null || exit 1
+        if [[ -n "$under" ]] && ! cmd_outline "$file_to" | grep -Fxq -- "$under"; then
+            die "no heading path '$under' in $file_to; see: roam-ctx outline $file_to"
+        fi
+    fi
+
+    local related="" id row
+    for id in ${links[@]+"${links[@]}"}; do
+        check_id "$id"
+        row=$(shared_node "$id") || exit 1
+        related+="${related:+, }[[id:$id][${row##*$'\t'}]]"
+    done
+
+    local body=""
+    [[ -t 0 ]] || body=$(cat)
+    # Demote headings in the body so they nest under this capture.
+    body=$(printf '%s' "$body" | sed -E 's/^(\*+) /*\1 /')
+
+    local repo="" name="" owner="" branch="" commit=""
+    IFS=$'\t' read -r repo name owner branch commit <<< "$(git_context)" || true
+
+    local words
+    words=$(
+        echo "$TAG"
+        [[ -z "$name" ]] || echo "repo_$name"
+        [[ -z "$owner" ]] || echo "owner_$owner"
+        tag_words "$tags"
+    )
+    local tagstr
+    tagstr=":$(printf '%s\n' "$words" | sed -E 's/[^A-Za-z0-9_@]+/_/g; /^$/d' | awk '!seen[$0]++' | paste -sd: -):"
+
+    mkdir -p "$INBOX"
+    local file
+    file="$INBOX/$(date +%F).org"
+    local lock="$file.lock" tries=0
+    until mkdir "$lock" 2> /dev/null; do
+        ((++tries < 50)) || die "could not lock $file (stale $lock?)"
+        sleep 0.1
+    done
+    # shellcheck disable=SC2064  # expand now; $lock is local and gone by EXIT
+    trap "rmdir $(printf '%q' "$lock") 2> /dev/null" EXIT
+
+    # shellcheck disable=SC2094  # size check precedes the append
+    {
+        [[ -s "$file" ]] || printf '#+title: Agent inbox %s\n\n' "$(date +%F)"
+        printf '* %s %s\n:PROPERTIES:\n' "$title" "$tagstr"
+        printf ':SUMMARY: %s\n:FILE_TO: %s\n' "$summary" "$file_to"
+        [[ -z "$under" ]] || printf ':FILE_UNDER: %s\n' "$under"
+        printf ':CAPTURED: %s\n:SOURCE: %s\n' "$(date '+[%Y-%m-%d %a %H:%M]')" "$src"
+        [[ -z "$repo" ]] || printf ':REPO: %s\n' "$repo"
+        [[ -z "$branch" ]] || printf ':BRANCH: %s\n' "$branch"
+        [[ -z "$commit" ]] || printf ':COMMIT: %s\n' "$commit"
+        printf ':CWD: %s\n:END:\n' "$PWD"
+        [[ -z "$body" ]] || printf '%s\n' "$body"
+        [[ -z "$related" ]] || printf '\nRelated: %s\n' "$related"
+        printf '\n'
+    } >> "$file"
+    echo "$file"
+}
+
+cmd_inbox() {
+    [[ -d "$INBOX" ]] || return 0
+    local files=("$INBOX"/*.org)
+    [[ -e "${files[0]}" ]] || return 0
+    if [[ "${1:-}" == "--full" ]]; then
+        for f in "${files[@]}"; do
+            echo "== $f"
+            cat "$f"
+        done
+    else
+        rg --line-number --no-heading --with-filename '^\* ' "${files[@]}" || true
+    fi
+}
+
+cmd_status() {
+    local ok=true
+    for dep in sqlite3 rg; do
+        if command -v "$dep" > /dev/null; then
+            echo "ok    $dep"
+        else
+            echo "MISS  $dep"; ok=false
+        fi
+    done
+    if [[ -r "$DB" ]]; then
+        echo "ok    database $DB"
+        echo "      $(sql "$(shared_cte) SELECT count(*) FROM shared;") note(s) tagged '$TAG'"
+    else
+        echo "MISS  database $DB (set ROAM_CTX_DB)"; ok=false
+    fi
+    echo "      inbox $INBOX ($(cmd_inbox | wc -l | tr -d ' ') pending)"
+    $ok
+}
+
+case "${1:-help}" in
+    index) shift; cmd_index "$@" ;;
+    get) shift; cmd_get "$@" ;;
+    search) shift; cmd_search "$@" ;;
+    outline) shift; cmd_outline "$@" ;;
+    links) shift; cmd_links "$@" ;;
+    capture) shift; cmd_capture "$@" ;;
+    inbox) shift; cmd_inbox "$@" ;;
+    status) cmd_status ;;
+    help | -h | --help) usage ;;
+    *) usage >&2; exit 1 ;;
+esac
