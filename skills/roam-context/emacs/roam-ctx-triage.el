@@ -1,7 +1,7 @@
 ;;; roam-ctx-triage.el --- Triage agent captures into org-roam -*- lexical-binding: t; -*-
 
 ;; Author: chazu
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1") (org "9.6") (org-roam "2.2"))
 ;; Keywords: outlines convenience
 
@@ -50,7 +50,7 @@ which is already shared."
   :type 'string)
 
 (defcustom roam-ctx-triage-kept-properties
-  '("SUMMARY" "CAPTURED" "SOURCE" "REPO" "BRANCH" "COMMIT" "CWD")
+  '("SUMMARY" "CAPTURED" "SOURCE" "MACHINE" "REPO" "BRANCH" "COMMIT" "CWD")
   "Capture properties copied into the filed note."
   :type '(repeat string))
 
@@ -106,6 +106,13 @@ which is already shared."
           ":END:\n"))
 
 ;;;; Locating a filing target
+
+(defun roam-ctx-triage--node (id)
+  "Return the org-roam node with ID, syncing the database once if needed.
+`roam-ctx' creates project hub notes outside Emacs, so a capture may
+target a hub the database has not indexed yet."
+  (or (org-roam-node-from-id id)
+      (progn (org-roam-db-sync) (org-roam-node-from-id id))))
 
 (defun roam-ctx-triage--split-path (path)
   "Split heading PATH (\"A > B\") into a list of titles."
@@ -218,7 +225,7 @@ overrides the title of a new note.  Return the file written."
   (let* ((cap (roam-ctx-triage--capture))
          (file (if (equal target "new")
                    (roam-ctx-triage--file-new cap title)
-                 (let ((node (org-roam-node-from-id target)))
+                 (let ((node (roam-ctx-triage--node target)))
                    (unless node (user-error "No org-roam node with id %s" target))
                    (roam-ctx-triage--file-into cap node under)))))
     (roam-ctx-triage--remove cap)
@@ -250,8 +257,8 @@ overrides the title of a new note.  Return the file written."
   "Return a short description of CAP's filing recommendation."
   (let ((to (plist-get cap :file-to)) (under (plist-get cap :under)))
     (cond ((or (null to) (equal to "new")) "new note")
-          ((org-roam-node-from-id to)
-           (concat (org-roam-node-title (org-roam-node-from-id to))
+          ((roam-ctx-triage--node to)
+           (concat (org-roam-node-title (roam-ctx-triage--node to))
                    (if under (concat " › " under) "")))
           (t (format "missing node %s" to)))))
 

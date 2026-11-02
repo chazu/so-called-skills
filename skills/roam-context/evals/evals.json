@@ -32,6 +32,35 @@
         "Agent relayed the 'no shared note' error",
         "Agent did not fall back to reading the file directly"
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "Remember that ripgrep's --smart-case only goes case-sensitive when the pattern has an uppercase letter. That's true everywhere, not just for this project.",
+      "expected_output": "A single global capture: no repository tags or REPO/BRANCH/COMMIT/CWD properties, filed as a new note.",
+      "assertions": [
+        "Agent passed --global to roam-ctx capture",
+        "Agent did not pass --machine, since the fact is not machine-specific",
+        "Capture has no repo_ or owner_ tags"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Save a note that on this laptop, Homebrew lives at /opt/homebrew and the system Emacs is not on PATH. It isn't about this repo.",
+      "expected_output": "A single global capture scoped to this machine with a machine_<name> tag and MACHINE property.",
+      "assertions": [
+        "Agent passed --global and --machine (without a name) to roam-ctx capture",
+        "Capture carries a machine_ tag matching roam-ctx machine"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Capture the decision we just made about the lock file format for this project. (The repository has no project hub note yet.)",
+      "expected_output": "The capture is filed to a newly created project hub; the agent reports the hub's path.",
+      "assertions": [
+        "Agent used --file-to auto (or omitted --file-to) rather than --file-to new",
+        "Agent relayed that roam-ctx created a project hub, with its path",
+        "Agent did not write the hub note itself"
+      ]
     }
   ]
 }

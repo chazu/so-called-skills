@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # roam-ctx -- Read-only context access to an org-roam store, plus a staging inbox
 #
-# Reads the org-roam SQLite database and note files directly; never writes to
-# them and never talks to Emacs. Only notes tagged $ROAM_CTX_TAG are visible.
-# Captures go to a dated org file in $ROAM_CTX_INBOX for human triage.
+# Reads the org-roam SQLite database (read-only) and note files. Only notes
+# tagged $ROAM_CTX_TAG are visible. Captures go to a dated org file in
+# $ROAM_CTX_INBOX for human triage. The one write into org-roam: creating a
+# missing project hub note in $ROAM_CTX_PROJECTS, after which it asks a running
+# Emacs (if any) to index it.
 #
 # Usage: roam-ctx <command> [args]   (see `roam-ctx help`)
 #
-# Requires: bash, sqlite3, rg
+# Requires: bash, sqlite3, rg. Optional: uuidgen (hub ids), emacsclient (sync).
 
 set -euo pipefail
 
@@ -15,6 +17,8 @@ DB="${ROAM_CTX_DB:-$HOME/.emacs.d/org-roam.db}"
 TAG="${ROAM_CTX_TAG:-agent}"
 INBOX="${ROAM_CTX_INBOX:-$HOME/org/agent-inbox}"
 SOURCE="${ROAM_CTX_SOURCE:-agent}"
+PROJECTS="${ROAM_CTX_PROJECTS:-$HOME/org/roam/projects}"
+EMACSCLIENT="${ROAM_CTX_EMACSCLIENT-emacsclient}"
 
 die() {
     echo "roam-ctx: $*" >&2
@@ -31,23 +35,31 @@ Commands:
   search <pattern>          Search shared notes (rg regex, smart case)
   outline <id>              Heading paths inside a shared note (for --under)
   links <id>                Backlinks and forward links among shared notes
-  hub                       The current repo's shared project hub note
+  hub [--create]            The current repo's shared project hub note;
+                            --create makes it first if there is none
   capture --title T --summary S [--tags a,b] [--link ID]...
-          [--file-to auto|new|ID [--under PATH]] [--source S] [--body-file F]
+          [--file-to auto|new|ID [--under PATH]] [--global] [--machine [NAME]]
+          [--source S] [--body-file F]
                             Append a capture (body on stdin or --body-file) to
                             today's inbox. Repo, owner, branch, commit come
-                            from git at $PWD. auto files to the repo's hub.
-                            Exits 3 if the inbox does not exist.
+                            from git at $PWD. auto files to the repo's hub,
+                            creating the hub if missing. --global drops all
+                            repo context; --machine scopes the capture to this
+                            machine (or NAME). Exits 3 if the inbox is missing.
   init                      Create the inbox directory (ask the user first)
   inbox [--full]            List pending captures (--full prints them)
+  machine                   This machine's name, as used by --machine
   status                    Check dependencies and configuration
   help                      Show this help
 
 Environment:
-  ROAM_CTX_DB      org-roam database   (default ~/.emacs.d/org-roam.db)
-  ROAM_CTX_TAG     opt-in tag          (default agent)
-  ROAM_CTX_INBOX   capture directory   (default ~/org/agent-inbox)
-  ROAM_CTX_SOURCE  capture source name (default agent)
+  ROAM_CTX_DB           org-roam database   (default ~/.emacs.d/org-roam.db)
+  ROAM_CTX_TAG          opt-in tag          (default agent)
+  ROAM_CTX_INBOX        capture directory   (default ~/org/agent-inbox)
+  ROAM_CTX_SOURCE       capture source name (default agent)
+  ROAM_CTX_PROJECTS     hub note directory  (default ~/org/roam/projects)
+  ROAM_CTX_MACHINE      machine name        (default: host name)
+  ROAM_CTX_EMACSCLIENT  syncs new hubs      (default emacsclient; empty: off)
 EOF
 }
 
@@ -80,12 +92,46 @@ check_id() {
     [[ "$1" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "invalid id: $1"
 }
 
-# Print "file<TAB>level<TAB>title" for a shared node, or fail.
+# Hub notes on disk in $PROJECTS, read from their headers so that a hub created
+# since org-roam last synced is still found. Prints
+# "file<TAB>id<TAB>title<TAB>repo<TAB>tags" (tags comma-separated).
+disk_hubs() {
+    [[ -d "$PROJECTS" ]] || return 0
+    local files=("$PROJECTS"/*.org)
+    [[ -e "${files[0]}" ]] || return 0
+    awk '
+        function flush() {
+            if (f != "" && id != "") printf "%s\t%s\t%s\t%s\t%s\n", f, id, ti, repo, tg
+        }
+        function val(s) { sub(/^[^ \t]+[ \t]+/, "", s); return s }
+        FNR == 1 { flush(); f = FILENAME; id = ti = repo = tg = ""; done = 0 }
+        done { next }
+        /^\*+ / { done = 1; next }
+        {
+            line = $0; sub(/[ \t]+$/, "", line); low = tolower(line)
+            if (id == "" && low ~ /^:id:[ \t]/) id = val(line)
+            else if (repo == "" && low ~ /^:project_repo:[ \t]/) repo = val(line)
+            else if (ti == "" && low ~ /^#\+title:[ \t]/) ti = val(line)
+            else if (tg == "" && low ~ /^#\+filetags:[ \t]/) {
+                tg = val(line); gsub(/^:+|:+$/, "", tg); gsub(/:+/, ",", tg)
+            }
+        }
+        END { flush() }' "${files[@]}"
+}
+
+# awk predicate: tags column $5 holds both "project" and the share tag.
+# shellcheck disable=SC2016  # awk code, expanded by awk
+HUB_AWK='function has(t) { return index("," $5 ",", "," t ",") > 0 }'
+
+# Print "file<TAB>level<TAB>title" for a shared node, or fail. Falls back to
+# shared hub notes on disk that the database has not picked up yet.
 shared_node() {
     local row
     row=$(sql "$(shared_cte)
         SELECT $(uq file), level, $(uq title) FROM nodes
         WHERE id = $(lit "$1") AND id IN shared;")
+    [[ -n "$row" ]] || row=$(disk_hubs | awk -F'\t' -v id="$1" -v tag="$TAG" "$HUB_AWK"'
+        $2 == id && has("project") && has(tag) { print $1 "\t0\t" $3; exit }')
     [[ -n "$row" ]] || die "no shared note with id $1 (missing, or not tagged '$TAG')"
     printf '%s\n' "$row"
 }
@@ -223,12 +269,14 @@ tag_words() {
     printf '%s' "$1" | tr ',' '\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/[^A-Za-z0-9_@]+/_/g; /^$/d'
 }
 
-# Print "repo<TAB>name<TAB>owner<TAB>branch<TAB>commit" for the git repo at $PWD.
-# repo matches the PROJECT_REPO key of init-conversations' hub notes:
-# lower-cased host/owner/name from origin, else local/<dirname>.
+# Print repo, name, owner, branch, commit, root for the git repo at $PWD,
+# separated by \037 (a tab is IFS whitespace, so empty fields would collapse).
+# repo matches the PROJECT_REPO key of init-conversations' hub
+# notes: lower-cased host/owner/name from origin, else local/<dirname>.
 git_context() {
     git rev-parse --is-inside-work-tree > /dev/null 2>&1 || return 0
-    local url repo name owner="" branch commit
+    local url repo name owner="" branch commit root
+    root=$(git rev-parse --show-toplevel)
     url=$(git remote get-url origin 2> /dev/null || true)
     if [[ -n "$url" ]]; then
         repo=$(printf '%s' "$url" | sed -E 's#^(ssh|git|https?)://##; s#^[^@/]+@##; s#^([^:/]+):#\1/#; s#\.git/?$##; s#/$##' |
@@ -237,46 +285,170 @@ git_context() {
         owner="${repo#*/}"
         owner="${owner%/*}"
     else
-        name=$(basename "$(git rev-parse --show-toplevel)")
+        name=$(basename "$root")
         repo="local/$name"
     fi
     branch=$(git rev-parse --abbrev-ref HEAD 2> /dev/null || true)
     commit=$(git rev-parse --short HEAD 2> /dev/null || true)
-    printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$name" "$owner" "$branch" "$commit"
+    printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$repo" "$name" "$owner" "$branch" "$commit" "$root"
 }
 
-# Find the project hub note (tagged project, PROJECT_REPO = $1).
-# Print "id<TAB>title<TAB>shared" where shared is 1 or 0; nothing if none.
+# Find the project hub note (tagged project, PROJECT_REPO = $1), in the
+# database or, failing that, on disk. Print "id<TAB>title<TAB>shared" where
+# shared is 1 or 0; nothing if there is none.
 hub_for() {
-    local key="${1//\'/\'\'}"
-    sql "$(shared_cte)
+    local key="${1//\'/\'\'}" row
+    row=$(sql "$(shared_cte)
         SELECT $(uq n.id), $(uq n.title), n.id IN shared FROM nodes n
         WHERE n.level = 0
           AND n.id IN (SELECT node_id FROM tags WHERE tag = '\"project\"')
           AND instr(n.properties, '(\"PROJECT_REPO\" . \"$key\")') > 0
-        LIMIT 1;"
+        LIMIT 1;")
+    [[ -n "$row" ]] || row=$(disk_hubs | awk -F'\t' -v key="$1" -v tag="$TAG" "$HUB_AWK"'
+        $4 == key && has("project") { print $2 "\t" $3 "\t" (has(tag) ? 1 : 0); exit }')
+    [[ -z "$row" ]] || printf '%s\n' "$row"
 }
 
-# Explain why there is no usable hub for repo $1 (hub row in $2), on stderr.
+# Ask a running Emacs to index file $1 into org-roam. Best effort: returns 1
+# if there is no emacsclient, no server, or no org-roam.
+emacs_sync() {
+    [[ -n "$EMACSCLIENT" ]] && command -v "$EMACSCLIENT" > /dev/null || return 1
+    local f="${1//\\/\\\\}" out
+    f="${f//\"/\\\"}"
+    out=$("$EMACSCLIENT" -a false --timeout=5 --eval \
+        "(when (fboundp 'org-roam-db-update-file) (org-roam-db-update-file \"$f\") t)" 2> /dev/null) || return 1
+    [[ "$out" == "t" ]]
+}
+
+new_id() {
+    if command -v uuidgen > /dev/null; then
+        uuidgen | tr '[:lower:]' '[:upper:]'
+    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+        tr '[:lower:]' '[:upper:]' < /proc/sys/kernel/random/uuid
+    else
+        return 1
+    fi
+}
+
+# Create the hub note for repo key $1, project root $2, using the same
+# template as init-conversations (my/project-node-ensure). Holds a lock and
+# re-checks, so concurrent agents make one hub. Prints "id<TAB>title<TAB>1"
+# like hub_for, or fails with a reason on stderr.
+create_hub() {
+    local key="$1" root="$2" title slug id file lock row
+    [[ -d "$(dirname "$PROJECTS")" ]] || {
+        echo "roam-ctx: org-roam directory $(dirname "$PROJECTS") not found (set ROAM_CTX_PROJECTS)" >&2
+        return 1
+    }
+    id=$(new_id) || { echo "roam-ctx: cannot make an id (install uuidgen)" >&2; return 1; }
+    title=$(basename "$root")
+    slug=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^[:alnum:]]+/_/g; s/^_+|_+$//g')
+    local short_root="$root"
+    [[ "$root" != "$HOME"* ]] || short_root="~${root#"$HOME"}"
+    mkdir -p "$PROJECTS"
+    lock="${TMPDIR:-/tmp}/roam-ctx-hub-$(printf '%s' "$key" | cksum | cut -d' ' -f1).lock"
+    local tries=0
+    until mkdir "$lock" 2> /dev/null; do
+        ((++tries < 50)) || { echo "roam-ctx: could not lock $lock (stale?)" >&2; return 1; }
+        sleep 0.1
+    done
+    row=$(hub_for "$key")
+    if [[ -z "$row" ]]; then
+        file="$PROJECTS/$(date +%Y%m%d%H%M%S)-$slug.org"
+        if ! (set -o noclobber; cat > "$file") 2> /dev/null <<EOF
+:PROPERTIES:
+:ID: $id
+:PROJECT_REPO: $key
+:PROJECT_ROOT: $short_root
+:END:
+#+title: $title
+#+filetags: :project:$TAG:
+
+Hub note for =$key=.  Conversations link here; see them in the backlinks
+buffer (C-c n l) or with C-c a c from inside the project.
+
+* Overview
+
+* Open questions
+
+* Decisions
+EOF
+        then
+            rmdir "$lock"
+            echo "roam-ctx: could not write $file" >&2
+            return 1
+        fi
+        if emacs_sync "$file"; then
+            echo "roam-ctx: created project hub '$title' for $key: $file" >&2
+        else
+            echo "roam-ctx: created project hub '$title' for $key: $file (not yet in the org-roam database; saving it in Emacs indexes it)" >&2
+        fi
+        row="$id"$'\t'"$title"$'\t1'
+    fi
+    rmdir "$lock"
+    printf '%s\n' "$row"
+}
+
+# Explain why repo $1 has no usable hub (hub row in $2, if any), on stderr.
 hub_hint() {
     if [[ -z "$2" ]]; then
-        echo "roam-ctx: no project hub note for $1; suggest the user create one (C-c a p in the project)" >&2
+        echo "roam-ctx: no project hub note for $1, and creating one failed" >&2
     else
         echo "roam-ctx: project hub '$(cut -f2 <<< "$2")' for $1 is not tagged '$TAG'; suggest the user share it" >&2
     fi
 }
 
-cmd_hub() {
-    local repo row
-    IFS=$'\t' read -r repo _ <<< "$(git_context)" || true
-    [[ -n "$repo" ]] || die "not in a git repository"
-    row=$(hub_for "$repo")
+# Print "id<TAB>title" of the shared hub for repo $1 (root $2), creating the
+# hub when there is none; on failure print a hint and return 1.
+ensure_hub() {
+    local row
+    row=$(hub_for "$1")
+    [[ -n "$row" ]] || row=$(create_hub "$1" "$2") || true
     if [[ -n "$row" && "${row##*$'\t'}" == "1" ]]; then
         cut -f1,2 <<< "$row"
     else
-        hub_hint "$repo" "$row"
-        exit 1
+        hub_hint "$1" "$row"
+        return 1
     fi
+}
+
+cmd_hub() {
+    local repo root row
+    IFS=$'\037' read -r repo _ _ _ _ root <<< "$(git_context)" || true
+    [[ -n "$repo" ]] || die "not in a git repository"
+    case "${1:-}" in
+        --create) ensure_hub "$repo" "$root" || exit 1 ;;
+        "")
+            row=$(hub_for "$repo")
+            if [[ -n "$row" && "${row##*$'\t'}" == "1" ]]; then
+                cut -f1,2 <<< "$row"
+            elif [[ -z "$row" ]]; then
+                echo "roam-ctx: no project hub note for $repo; capture creates one, or run: roam-ctx hub --create" >&2
+                exit 1
+            else
+                hub_hint "$repo" "$row"
+                exit 1
+            fi
+            ;;
+        *) die "usage: roam-ctx hub [--create]" ;;
+    esac
+}
+
+# Sanitise a machine name into tag form: lower case, [a-z0-9_].
+machine_word() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_]+/_/g; s/^_+|_+$//g'
+}
+
+# This machine's name: $ROAM_CTX_MACHINE, else the macOS LocalHostName, else
+# the short host name.
+machine_name() {
+    local m="${ROAM_CTX_MACHINE:-}"
+    [[ -n "$m" ]] || m=$(scutil --get LocalHostName 2> /dev/null || hostname -s 2> /dev/null || hostname)
+    machine_word "$m"
+}
+
+cmd_machine() {
+    machine_name
 }
 
 cmd_init() {
@@ -286,8 +458,22 @@ cmd_init() {
 
 cmd_capture() {
     local title="" summary="" tags="" src="$SOURCE" file_to="auto" under="" body_file=""
+    local global=false machine=""
     local links=()
     while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --global) global=true; shift; continue ;;
+            --machine)
+                # Optional value: the next word, unless it is another option.
+                if [[ $# -ge 2 && "$2" != --* ]]; then
+                    machine=$(machine_word "$2"); shift 2
+                else
+                    machine=$(machine_name); shift
+                fi
+                [[ -n "$machine" ]] || die "--machine: no usable machine name (set ROAM_CTX_MACHINE)"
+                continue
+                ;;
+        esac
         [[ $# -ge 2 ]] || die "capture option $1 needs a value"
         case "$1" in
             --title) title="$2" ;;
@@ -305,7 +491,7 @@ cmd_capture() {
     title="${title//$'\n'/ }"
     summary="${summary//$'\n'/ }"
     [[ -n "${title// /}" && -n "${summary// /}" ]] ||
-        die "usage: roam-ctx capture --title T --summary S [--tags a,b] [--link ID]... [--file-to auto|new|ID [--under PATH]] [--source S] [--body-file F | < body]"
+        die "usage: roam-ctx capture --title T --summary S [--tags a,b] [--link ID]... [--file-to auto|new|ID [--under PATH]] [--global] [--machine [NAME]] [--source S] [--body-file F | < body]"
 
     # Captures never create the inbox: the user decides where it lives.
     [[ -d "$INBOX" ]] || {
@@ -313,19 +499,21 @@ cmd_capture() {
         exit 3
     }
 
-    local repo="" name="" owner="" branch="" commit=""
-    IFS=$'\t' read -r repo name owner branch commit <<< "$(git_context)" || true
+    # A global capture carries no project context at all.
+    local repo="" name="" owner="" branch="" commit="" root="" cwd="$PWD"
+    if $global; then
+        cwd=""
+    else
+        IFS=$'\037' read -r repo name owner branch commit root <<< "$(git_context)" || true
+    fi
 
-    # auto: the repo's shared hub note if there is one, else a new note.
+    # auto: the repo's shared hub note, created if missing; else a new note.
     if [[ "$file_to" == "auto" ]]; then
         file_to="new"
         if [[ -n "$repo" ]]; then
             local hub
-            hub=$(hub_for "$repo")
-            if [[ -n "$hub" && "${hub##*$'\t'}" == "1" ]]; then
+            if hub=$(ensure_hub "$repo" "$root"); then
                 file_to="${hub%%$'\t'*}"
-            else
-                hub_hint "$repo" "$hub"
             fi
         fi
     fi
@@ -363,6 +551,7 @@ cmd_capture() {
         echo "$TAG"
         [[ -z "$name" ]] || echo "repo_$name"
         [[ -z "$owner" ]] || echo "owner_$owner"
+        [[ -z "$machine" ]] || echo "machine_$machine"
         tag_words "$tags"
     )
     local tagstr
@@ -385,10 +574,12 @@ cmd_capture() {
         printf ':SUMMARY: %s\n:FILE_TO: %s\n' "$summary" "$file_to"
         [[ -z "$under" ]] || printf ':FILE_UNDER: %s\n' "$under"
         printf ':CAPTURED: %s\n:SOURCE: %s\n' "$(date '+[%Y-%m-%d %a %H:%M]')" "$src"
+        [[ -z "$machine" ]] || printf ':MACHINE: %s\n' "$machine"
         [[ -z "$repo" ]] || printf ':REPO: %s\n' "$repo"
         [[ -z "$branch" ]] || printf ':BRANCH: %s\n' "$branch"
         [[ -z "$commit" ]] || printf ':COMMIT: %s\n' "$commit"
-        printf ':CWD: %s\n:END:\n' "$PWD"
+        [[ -z "$cwd" ]] || printf ':CWD: %s\n' "$cwd"
+        printf ':END:\n'
         [[ -z "$body" ]] || printf '%s\n' "$body"
         [[ -z "$related" ]] || printf '\nRelated: %s\n' "$related"
         printf '\n'
@@ -430,6 +621,12 @@ cmd_status() {
     else
         echo "MISS  inbox $INBOX (ask the user, then: roam-ctx init)"
     fi
+    if [[ -d "$(dirname "$PROJECTS")" ]]; then
+        echo "ok    hubs $PROJECTS"
+    else
+        echo "MISS  hubs $PROJECTS (cannot create hub notes; set ROAM_CTX_PROJECTS)"
+    fi
+    echo "      machine $(machine_name)${ROAM_CTX_MACHINE:+ (ROAM_CTX_MACHINE)}"
     $ok
 }
 
@@ -440,9 +637,10 @@ case "${1:-help}" in
     outline) shift; cmd_outline "$@" ;;
     links) shift; cmd_links "$@" ;;
     capture) shift; cmd_capture "$@" ;;
-    hub) cmd_hub ;;
+    hub) shift; cmd_hub "$@" ;;
     init) cmd_init ;;
     inbox) shift; cmd_inbox "$@" ;;
+    machine) cmd_machine ;;
     status) cmd_status ;;
     help | -h | --help) usage ;;
     *) usage >&2; exit 1 ;;

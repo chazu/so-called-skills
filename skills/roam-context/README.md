@@ -9,7 +9,9 @@ letting agents write into your notes.
   `agent` tag; everything else is invisible to the CLI, including in search
   results and link listings.
 - **Writes go to a staging inbox** outside the org-roam directory, one org file
-  per day. Nothing reaches org-roam until you promote it.
+  per day. Nothing reaches org-roam until you promote it, with one
+  exception: when a repository has no project hub note, the CLI creates one
+  (see [Project Hubs](#project-hubs)).
 
 ## Setup
 
@@ -82,13 +84,35 @@ Related: [[id:1CD70A22-7867-474E-BFC2-02E8F6423E1F][Tartan]]
 - `FILE_TO` is `new` or a shared note's id; `FILE_UNDER` is a heading path in
   that note. The CLI rejects ids and paths that do not exist.
 - Without a target from the agent, a capture goes to the repository's
-  project hub note: a note tagged `:project:` whose `PROJECT_REPO` property
-  is the normalised origin remote (`github.com/owner/repo`), when that note is
-  also shared. Otherwise it becomes a new note, and the agent suggests
-  creating or sharing the hub.
+  project hub note, created if missing (see below). If the hub exists but is
+  not shared, the capture becomes a new note and the agent suggests sharing
+  the hub.
+- `--global` makes a capture independent of the project: no repository or
+  owner tags, no `REPO`, `BRANCH`, `COMMIT`, or `CWD`, and no hub filing.
+- `--machine` scopes a capture to one machine: it adds a `machine_<name>`
+  tag and a `MACHINE` property. It works with project and global captures.
+  The name is `ROAM_CTX_MACHINE` if set, else the host name (`roam-ctx
+  machine` prints it). Set `ROAM_CTX_MACHINE` on each machine, for example to
+  `home` and `work`, so the names are stable and readable.
 - Agents never create the inbox. If it is missing, they ask you, then run
   `roam-ctx init`.
 - Captures have no `:ID:`, so org-roam never indexes the inbox.
+
+## Project Hubs
+
+A hub note is a note tagged `:project:` whose `PROJECT_REPO` property is the
+normalised origin remote (`github.com/owner/repo`, or `local/<dirname>`
+without one). When a project capture has no explicit target and the
+repository has no hub, `roam-ctx` creates one in `ROAM_CTX_PROJECTS`, using the
+same template as the `C-c a p` command in the author's Emacs config, tagged
+`:project:agent:`. `roam-ctx hub --create` does the same on demand.
+
+It then asks a running Emacs, through `emacsclient`, to index the file
+(`org-roam-db-update-file`). It never starts an Emacs. If there is no
+server, the hub stays out of the database until Emacs indexes it, for example
+when you save it or restart Emacs. Until then the CLI reads the hub from
+disk, so captures still file to it. Set `ROAM_CTX_EMACSCLIENT=` (empty) to
+skip the sync.
 
 ## Daily Triage
 
