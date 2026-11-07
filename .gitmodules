@@ -1,0 +1,3 @@
+[submodule "external/emacs-skills"]
+	path = external/emacs-skills
+	url = https://github.com/xenodium/emacs-skills.git

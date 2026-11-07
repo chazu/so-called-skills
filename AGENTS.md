@@ -19,6 +19,26 @@ skill_index.json     # Auto-generated index of published skills
 install.sh           # Installs skills to user discovery directories
 ```
 
+## External Skills
+
+`external/` holds other people's skill collections as git submodules, pinned
+to a reviewed commit. They are not validated or indexed here and are not
+edited; update one with `git -C external/<name> fetch && git -C external/<name>
+checkout <commit>` after reading the diff.
+
+Their skills are linked one by one into `~/.claude/skills/`:
+
+```bash
+ln -s ~/dev/ai/skills/external/emacs-skills/skills/<skill> ~/.claude/skills/<skill>
+```
+
+- `emacs-skills` (xenodium): all skills except `emacsclient` (it tells every
+  agent to run byte-compiles and tests inside the user's live Emacs, and its
+  test example calls `ert-run-tests-batch-and-exit`, which exits that Emacs)
+  and `mappu` (auto-invoked, needs a CLI that is not installed).
+  `xcode-shared` is linked too: it holds no skill, but the `xcode-*` skills
+  load its elisp from the sibling directory.
+
 ## Conventions
 
 - Every skill lives in `skills/<name>/` and **must** contain a `SKILL.md`.
